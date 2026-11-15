@@ -2,10 +2,11 @@
 from __future__ import annotations
 from pathlib import Path
 from io import BytesIO
-import hashlib,json,zipfile
+import hashlib, json, zipfile
 from PIL import Image
 from sm64_scratch.sb3_builder import _write_project
 from sm64_scratch.decoders.decode_models import _texture_tokens
+
 
 def compact_archive(sb3_path: Path):
     """Prune unused media and compress the finished SB3 once after all patches."""
@@ -16,11 +17,12 @@ def compact_archive(sb3_path: Path):
             referenced = {'project.json'} | {
                 asset['md5ext'] for target in project['targets']
                 for kind in ('costumes', 'sounds') for asset in target.get(kind, [])}
-            with zipfile.ZipFile(temporary, 'w') as target:
-                for item in source.infolist():
-                    if item.filename in referenced:
-                        target.writestr(item, source.read(item.filename),
-                                        compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+            entries = [(item, source.read(item.filename))
+                       for item in source.infolist() if item.filename in referenced]
+        with zipfile.ZipFile(temporary, 'w') as target:
+            for item, data in entries:
+                target.writestr(item, data,
+                                compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
         temporary.replace(sb3_path)
     finally:
         if temporary.exists():
@@ -59,9 +61,9 @@ def replace_costume_assets(sb3_path: Path, assets_by_sprite: dict[str, list[tupl
                 if costume is None:
                     raise ValueError(f'Missing costume: {sprite}/{costume_name}')
                 md5ext, _image_bytes = encoded[(sprite, costume_name)]
-                costume['assetId'] = md5ext.rsplit('.',1)[0]
+                costume['assetId'] = md5ext.rsplit('.', 1)[0]
                 costume['md5ext'] = md5ext
-                costume['dataFormat'] = md5ext.rsplit('.',1)[1]
+                costume['dataFormat'] = md5ext.rsplit('.', 1)[1]
                 if costume['dataFormat'] == 'svg':
                     costume['bitmapResolution'] = 1
 
@@ -75,27 +77,28 @@ def replace_costume_assets(sb3_path: Path, assets_by_sprite: dict[str, list[tupl
         bytes_by_name = {}
         for _key, (md5ext, image_bytes) in encoded.items():
             bytes_by_name[md5ext] = image_bytes
-        temporary = sb3_path.with_name(sb3_path.name + '.hud.tmp')
-        try:
-            with zipfile.ZipFile(temporary, 'w') as target:
-                seen = set()
-                for item in source.infolist():
-                    if item.filename not in referenced:
-                        continue
-                    seen.add(item.filename)
-                    if item.filename == 'project.json':
-                        _write_project(target, item, payload)
-                    elif item.filename in bytes_by_name:
-                        target.writestr(item, bytes_by_name[item.filename])
-                    else:
-                        target.writestr(item, source.read(item.filename))
-                for filename, image_bytes in bytes_by_name.items():
-                    if filename not in seen:
-                        target.writestr(filename, image_bytes)
-            temporary.replace(sb3_path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+        entries = [(item, source.read(item.filename))
+                   for item in source.infolist() if item.filename in referenced]
+
+    temporary = sb3_path.with_name(sb3_path.name + '.hud.tmp')
+    try:
+        with zipfile.ZipFile(temporary, 'w') as target:
+            seen = set()
+            for item, data in entries:
+                seen.add(item.filename)
+                if item.filename == 'project.json':
+                    _write_project(target, item, payload)
+                elif item.filename in bytes_by_name:
+                    target.writestr(item, bytes_by_name[item.filename])
+                else:
+                    target.writestr(item, data)
+            for filename, image_bytes in bytes_by_name.items():
+                if filename not in seen:
+                    target.writestr(filename, image_bytes)
+        temporary.replace(sb3_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def add_game_models(sb3_path, by_model, restored_models):
@@ -112,6 +115,7 @@ def add_game_models(sb3_path, by_model, restored_models):
             if texture_name not in existing:
                 models[name] += ' ' + _texture_tokens(texture_name, image)
                 existing.add(texture_name)
+
     with zipfile.ZipFile(sb3_path) as source:
         project = json.loads(source.read('project.json'))
         stage = next(t for t in project['targets'] if t.get('isStage'))
@@ -121,11 +125,13 @@ def add_game_models(sb3_path, by_model, restored_models):
         for name, text in sorted(models.items()):
             preloaded[1].extend(('+' + name, text))
         payload = json.dumps(project, separators=(',', ':')).encode()
-        temporary = sb3_path.with_name(sb3_path.name + '.models.tmp')
-        try:
-            with zipfile.ZipFile(temporary, 'w') as out:
-                for item in source.infolist():
-                    _write_project(out, item, payload if item.filename == 'project.json' else source.read(item.filename))
-            temporary.replace(sb3_path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        entries = [(item, source.read(item.filename)) for item in source.infolist()]
+
+    temporary = sb3_path.with_name(sb3_path.name + '.models.tmp')
+    try:
+        with zipfile.ZipFile(temporary, 'w') as out:
+            for item, data in entries:
+                _write_project(out, item, payload if item.filename == 'project.json' else data)
+        temporary.replace(sb3_path)
+    finally:
+        temporary.unlink(missing_ok=True)   
